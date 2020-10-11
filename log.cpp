@@ -12,8 +12,6 @@ LogManager::LogManager(const char * log_name)
 {
     _buffer_size = 64 * 1024 * 1024;
     int align = 512 - 1;
-    _buffer = (char *)malloc(_buffer_size + align); // 64 MB
-    _buffer = (char *)(((uintptr_t)_buffer + align)&~((uintptr_t)align));
     _lsn = 0;
     _name_size = 50;
     _log_name = new char[_name_size];
@@ -26,12 +24,18 @@ LogManager::LogManager(const char * log_name)
     }
     
     // group commit
-    flush_buffer_ = (char *)malloc(_buffer_size + align); // 64 MB
-    flush_buffer_ = (char *)(((uintptr_t)flush_buffer_ + align)&~((uintptr_t)align));
     latch_ = new std::mutex();
     swap_lock = new std::mutex();
     cv_ = new std::condition_variable();
     appendCv_ = new std::condition_variable();
+    buffer_cv_ = new std::condition_variable();
+    flush_cv_ = new std::condition_variable();
+    latch_return_response_ = new std::mutex();
+
+    _buffer = (char *)malloc(_buffer_size + align); // 64 MB
+    _buffer = (char *)(((uintptr_t)_buffer + align)&~((uintptr_t)align));
+    flush_buffer_ = (char *)malloc(_buffer_size + align); // 64 MB
+    flush_buffer_ = (char *)(((uintptr_t)flush_buffer_ + align)&~((uintptr_t)align));
 }
 
 LogManager::~LogManager() {
@@ -113,6 +117,8 @@ void LogManager::log_request(const HelloRequest* request, HelloReply * reply) {
     }
     swap_lock->unlock();
     // TODO: sleep until flush finish and wakeup
+    std::unique_lock<std::mutex> latch2(*latch_return_response_);
+    buffer_cv_->wait(latch2);
     reply->set_reply_type(HelloReply::ACK);
 }
 
@@ -165,6 +171,7 @@ void LogManager::run_flush_thread() {
                 swap_lock->lock();
                 std::swap(_buffer,flush_buffer_);
                 std::swap(logBufferOffset_,flushBufferSize_);
+                std::swap(buffer_cv_,flush_cv_);
                 swap_lock->unlock();
                 
                 uint64_t aligned_size = PGROUNDUP(flushBufferSize_);
@@ -180,6 +187,7 @@ void LogManager::run_flush_thread() {
 
                 flushBufferSize_ = 0;
                 // TODO: finish flushing and notify all
+                flush_cv_->notify_all();
             }
             needFlush_ = false;
             appendCv_->notify_all();
