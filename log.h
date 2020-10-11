@@ -66,10 +66,7 @@ private:
     // for notifying flush thread
     std::condition_variable * cv_;
     // for ensuring log on disk
-    std::condition_variable * buffer_cv_;
     std::condition_variable * flush_cv_;
-    // latch for return response
-    std::mutex * latch_return_response_;
 
     // LogRecord::Type check_log(Message * msg);
     void log_request(const HelloRequest* request, HelloReply* reply);

@@ -30,6 +30,9 @@
 #include "helloworld.grpc.pb.h"
 #endif
 
+#include "global.h"
+#include "log.h"
+
 using grpc::Server;
 using grpc::ServerAsyncResponseWriter;
 using grpc::ServerBuilder;
@@ -40,12 +43,32 @@ using helloworld::HelloRequest;
 using helloworld::HelloReply;
 using helloworld::Greeter;
 
+#define NUM_RPC_SERVER_THREADS 24
+
 class ServerImpl final {
  public:
   ~ServerImpl() {
     server_->Shutdown();
     // Always shutdown the completion queue after the server.
     cq_->Shutdown();
+  }
+
+  // This can be run in multiple threads if needed.
+  static void HandleRpcs(ServerImpl * s) {
+    // Spawn a new CallData instance to serve new clients.
+    new CallData(&(s->service_), s->cq_.get());
+    void* tag;  // uniquely identifies a request.
+    bool ok;
+    while (true) {
+      // Block waiting to read the next event from the completion queue. The
+      // event is uniquely identified by its tag, which in this case is the
+      // memory address of a CallData instance.
+      // The return value of Next should always be checked. This return value
+      // tells us whether there is any kind of event or cq_ is shutting down.
+      GPR_ASSERT(s->cq_->Next(&tag, &ok));
+      GPR_ASSERT(ok);
+      static_cast<CallData*>(tag)->Proceed();
+    }
   }
 
   // There is no shutdown handling in this code.
@@ -66,7 +89,10 @@ class ServerImpl final {
     std::cout << "Server listening on " << server_address << std::endl;
 
     // Proceed to the server's main loop.
-    HandleRpcs();
+    _thread_pool = new std::thread * [NUM_RPC_SERVER_THREADS];
+    for (uint32_t i = 0; i < NUM_RPC_SERVER_THREADS; i++) {
+        _thread_pool[i] = new std::thread(HandleRpcs, this);
+    }
   }
 
  private:
@@ -102,6 +128,7 @@ class ServerImpl final {
 
         // The actual processing.
         std::string prefix("Hello ");
+        log_manager->log(&request_, &reply_);
         reply_.set_message(prefix + request_.name());
 
         // And we are done! Let the gRPC runtime know we've finished, using the
@@ -138,34 +165,25 @@ class ServerImpl final {
     // Let's implement a tiny state machine with the following states.
     enum CallStatus { CREATE, PROCESS, FINISH };
     CallStatus status_;  // The current serving state.
+
   };
 
-  // This can be run in multiple threads if needed.
-  void HandleRpcs() {
-    // Spawn a new CallData instance to serve new clients.
-    new CallData(&service_, cq_.get());
-    void* tag;  // uniquely identifies a request.
-    bool ok;
-    while (true) {
-      // Block waiting to read the next event from the completion queue. The
-      // event is uniquely identified by its tag, which in this case is the
-      // memory address of a CallData instance.
-      // The return value of Next should always be checked. This return value
-      // tells us whether there is any kind of event or cq_ is shutting down.
-      GPR_ASSERT(cq_->Next(&tag, &ok));
-      GPR_ASSERT(ok);
-      static_cast<CallData*>(tag)->Proceed();
-    }
-  }
-
+  
   std::unique_ptr<ServerCompletionQueue> cq_;
   Greeter::AsyncService service_;
   std::unique_ptr<Server> server_;
+  std::thread **  _thread_pool;
 };
 
 int main(int argc, char** argv) {
+    std::string log_name = "test_log";
+ log_manager = new LogManager(log_name.c_str());
+ log_manager->test();
+ log_manager->run_flush_thread();
+
   ServerImpl server;
   server.Run();
+  log_manager->stop_flush_thread();
 
   return 0;
 }
